@@ -18,10 +18,10 @@ def get_current_price(symbol):
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
     response = requests.get(url)
     data = response.json()
-    
+
     if "price" not in data:
         return None
-    
+
     return float(data["price"])
 
 @app.get("/")
@@ -44,7 +44,6 @@ async def lux_webhook(request: Request):
     if not current_price:
         raise HTTPException(status_code=500, detail="Market data unavailable")
 
-    # TEMP fixed risk distance (we replace with ATR next phase)
     risk_distance = 0.0020
 
     if direction.upper() == "BUY":
@@ -62,7 +61,6 @@ async def lux_webhook(request: Request):
         if not bot:
             raise HTTPException(status_code=404, detail="Bot not found")
 
-        # Insert into trade_queue
         await conn.execute(
             """
             INSERT INTO trade_queue (bot_id, symbol, direction, entry, stop_loss, take_profit)
@@ -82,6 +80,3 @@ async def lux_webhook(request: Request):
         "stop_loss": stop_loss,
         "take_profit": take_profit
     }
-        )
-
-    return {"status": "Signal logged"}
