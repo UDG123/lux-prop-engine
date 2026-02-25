@@ -15,6 +15,7 @@ async def startup():
     print("Database connected")
 
 def get_current_price(symbol):
+    # Convert EURUSD -> EUR/USD if needed
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
     response = requests.get(url)
     data = response.json()
