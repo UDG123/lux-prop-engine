@@ -115,7 +115,7 @@ Return exactly:
 """
 
     payload = {
-        "model": "claude-3-5-haiku-latest",
+        "model": "claude-3-haiku-latest",
         "max_tokens": 200,
         "temperature": 0,
         "messages": [
@@ -145,7 +145,7 @@ Return exactly:
 
         text = raw["content"][0]["text"]
 
-        # 🔥 STRONG JSON EXTRACTION
+        # Strong JSON extraction
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             print("JSON NOT FOUND IN:", text)
