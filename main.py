@@ -14,14 +14,13 @@ app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# 🔥 HARD SET MODEL HERE
-CLAUDE_MODEL = "claude-3-5-sonnet-latest"
+OPENAI_MODEL = "gpt-4o"
 
 print("======================================")
 print("🚀 LUX PROP ENGINE STARTING")
-print("🔥 USING CLAUDE MODEL:", CLAUDE_MODEL)
+print("🔥 USING OPENAI MODEL:", OPENAI_MODEL)
 print("======================================")
 
 # =========================
@@ -58,8 +57,6 @@ def get_current_price(symbol):
     response = requests.get(url)
     data = response.json()
 
-    print("📈 PRICE RESPONSE:", data)
-
     if "price" not in data:
         raise HTTPException(status_code=400, detail="Market data unavailable")
 
@@ -70,8 +67,6 @@ def get_atr(symbol):
     url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url)
     data = response.json()
-
-    print("📊 ATR RESPONSE:", data)
 
     if "values" not in data:
         raise HTTPException(status_code=400, detail="ATR unavailable")
@@ -87,22 +82,18 @@ def classify_regime(atr):
         return "HIGH"
 
 # =========================
-# CLAUDE AI ENGINE
+# OPENAI ENGINE
 # =========================
 
-def consult_claude(symbol, direction, price, atr, regime):
+def consult_openai(symbol, direction, price, atr, regime):
 
-    print("======================================")
-    print("🤖 CALLING CLAUDE")
-    print("🔥 MODEL:", CLAUDE_MODEL)
-    print("======================================")
+    print("🤖 CALLING OPENAI MODEL:", OPENAI_MODEL)
 
-    url = "https://api.anthropic.com/v1/messages"
+    url = "https://api.openai.com/v1/chat/completions"
 
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01"
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
     }
 
     prompt = f"""
@@ -123,41 +114,24 @@ Return ONLY valid JSON:
 """
 
     payload = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": 200,
+        "model": OPENAI_MODEL,
         "temperature": 0,
         "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
+            {"role": "system", "content": "You respond only in valid JSON."},
+            {"role": "user", "content": prompt}
         ]
     }
-
-    print("📦 CLAUDE PAYLOAD:", payload)
 
     try:
         response = requests.post(url, headers=headers, json=payload)
         raw = response.json()
 
-        print("🧠 CLAUDE RAW RESPONSE:", raw)
+        print("🧠 OPENAI RAW RESPONSE:", raw)
 
-        if "content" not in raw:
-            return {
-                "confidence": 0.5,
-                "reason": "Fallback - No content"
-            }
+        content = raw["choices"][0]["message"]["content"]
 
-        text = raw["content"][0]["text"]
-
-        match = re.search(r"\{.*\}", text, re.DOTALL)
+        match = re.search(r"\{.*\}", content, re.DOTALL)
         if not match:
-            print("❌ JSON NOT FOUND IN:", text)
             return {
                 "confidence": 0.5,
                 "reason": "Fallback - JSON not found"
@@ -171,7 +145,7 @@ Return ONLY valid JSON:
         }
 
     except Exception as e:
-        print("🚨 CLAUDE ERROR:", str(e))
+        print("🚨 OPENAI ERROR:", str(e))
         return {
             "confidence": 0.5,
             "reason": "Fallback - Exception"
@@ -184,8 +158,6 @@ Return ONLY valid JSON:
 @app.post("/webhook/lux")
 async def receive_lux_signal(signal: LuxSignal):
 
-    print("📩 RECEIVED SIGNAL:", signal)
-
     price = get_current_price(signal.symbol)
     atr = get_atr(signal.symbol)
     regime = classify_regime(atr)
@@ -197,7 +169,7 @@ async def receive_lux_signal(signal: LuxSignal):
         stop_loss = price + (atr * 2)
         take_profit = price - (atr * 4)
 
-    ai = consult_claude(
+    ai = consult_openai(
         signal.symbol,
         signal.direction,
         price,
@@ -242,4 +214,4 @@ async def receive_lux_signal(signal: LuxSignal):
 
 @app.get("/")
 def health():
-    return {"status": "Lux Prop Engine Running"}
+    return {"status": "Lux Prop Engine Running (OpenAI)"}
