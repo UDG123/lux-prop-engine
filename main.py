@@ -22,7 +22,7 @@ async def startup():
 
 
 # ===============================
-# MARKET DATA FUNCTION
+# MARKET DATA + REGIME ENGINE
 # ===============================
 def get_price_and_atr(symbol):
     # Normalize FX symbols: EURUSD -> EUR/USD
@@ -33,7 +33,7 @@ def get_price_and_atr(symbol):
 
     if not api_key:
         print("TWELVEDATA_API_KEY not set")
-        return None, None
+        return None, None, None
 
     # ---- GET PRICE ----
     price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
@@ -41,21 +41,38 @@ def get_price_and_atr(symbol):
 
     if "price" not in price_response:
         print("PRICE ERROR:", price_response)
-        return None, None
+        return None, None, None
 
     price = float(price_response["price"])
 
-    # ---- GET ATR (15m timeframe) ----
-    atr_url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={api_key}"
+    # ---- GET ATR HISTORY (50 bars, 15min) ----
+    atr_url = (
+        f"https://api.twelvedata.com/atr?"
+        f"symbol={symbol}&interval=15min&time_period=14&outputsize=50&apikey={api_key}"
+    )
     atr_response = requests.get(atr_url).json()
 
     if "values" not in atr_response:
         print("ATR ERROR:", atr_response)
-        return price, None
+        return price, None, None
 
-    atr = float(atr_response["values"][0]["atr"])
+    atr_values = [float(x["atr"]) for x in atr_response["values"]]
 
-    return price, atr
+    current_atr = atr_values[0]
+    sorted_atr = sorted(atr_values)
+
+    # Percentile rank
+    percentile = sorted_atr.index(current_atr) / len(sorted_atr)
+
+    # ---- REGIME CLASSIFICATION ----
+    if percentile < 0.3:
+        regime = "LOW"
+    elif percentile < 0.7:
+        regime = "NORMAL"
+    else:
+        regime = "HIGH"
+
+    return price, current_atr, regime
 
 
 # ===============================
@@ -80,16 +97,23 @@ async def lux_webhook(request: Request):
     if not symbol or not direction or not bot_name:
         raise HTTPException(status_code=400, detail="Invalid payload")
 
-    current_price, atr = get_price_and_atr(symbol)
+    current_price, atr, regime = get_price_and_atr(symbol)
 
     if not current_price or not atr:
         raise HTTPException(status_code=500, detail="Market data unavailable")
 
     # ===============================
-    # RISK ENGINE (ATR-BASED)
+    # REGIME-AWARE RISK ENGINE
     # ===============================
-    risk_multiplier = 1.2   # can adjust per bot later
-    rr_ratio = 1.8
+    if regime == "LOW":
+        risk_multiplier = 0.9
+        rr_ratio = 1.5
+    elif regime == "NORMAL":
+        risk_multiplier = 1.2
+        rr_ratio = 1.8
+    else:  # HIGH volatility
+        risk_multiplier = 1.5
+        rr_ratio = 2.2
 
     risk_distance = atr * risk_multiplier
 
@@ -130,5 +154,6 @@ async def lux_webhook(request: Request):
         "entry": round(current_price, 5),
         "stop_loss": round(stop_loss, 5),
         "take_profit": round(take_profit, 5),
-        "atr": round(atr, 6)
+        "atr": round(atr, 6),
+        "regime": regime
     }
