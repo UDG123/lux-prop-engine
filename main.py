@@ -16,6 +16,14 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
+# 🔥 HARD SET MODEL HERE
+CLAUDE_MODEL = "claude-3-5-sonnet-latest"
+
+print("======================================")
+print("🚀 LUX PROP ENGINE STARTING")
+print("🔥 USING CLAUDE MODEL:", CLAUDE_MODEL)
+print("======================================")
+
 # =========================
 # DATABASE CONNECTION
 # =========================
@@ -24,7 +32,7 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 async def startup():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
-    print("Database connected")
+    print("✅ Database connected")
 
 # =========================
 # REQUEST MODEL
@@ -50,6 +58,8 @@ def get_current_price(symbol):
     response = requests.get(url)
     data = response.json()
 
+    print("📈 PRICE RESPONSE:", data)
+
     if "price" not in data:
         raise HTTPException(status_code=400, detail="Market data unavailable")
 
@@ -60,6 +70,8 @@ def get_atr(symbol):
     url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url)
     data = response.json()
+
+    print("📊 ATR RESPONSE:", data)
 
     if "values" not in data:
         raise HTTPException(status_code=400, detail="ATR unavailable")
@@ -80,6 +92,11 @@ def classify_regime(atr):
 
 def consult_claude(symbol, direction, price, atr, regime):
 
+    print("======================================")
+    print("🤖 CALLING CLAUDE")
+    print("🔥 MODEL:", CLAUDE_MODEL)
+    print("======================================")
+
     url = "https://api.anthropic.com/v1/messages"
 
     headers = {
@@ -91,30 +108,22 @@ def consult_claude(symbol, direction, price, atr, regime):
     prompt = f"""
 You are an institutional prop firm risk committee.
 
-Analyze this trade:
-
 Symbol: {symbol}
 Direction: {direction}
 Entry Price: {price}
 ATR: {atr}
 Market Regime: {regime}
 
-Return ONLY valid JSON.
-
-Do NOT include markdown.
-Do NOT include commentary.
-Do NOT include text outside JSON.
-
-Format:
+Return ONLY valid JSON:
 
 {{
   "confidence": number between 0 and 1,
-  "reason": "short professional risk justification"
+  "reason": "short professional explanation"
 }}
 """
 
     payload = {
-        "model": "claude-3-5-sonnet-latest",
+        "model": CLAUDE_MODEL,
         "max_tokens": 200,
         "temperature": 0,
         "messages": [
@@ -130,11 +139,13 @@ Format:
         ]
     }
 
+    print("📦 CLAUDE PAYLOAD:", payload)
+
     try:
         response = requests.post(url, headers=headers, json=payload)
         raw = response.json()
 
-        print("CLAUDE RAW RESPONSE:", raw)
+        print("🧠 CLAUDE RAW RESPONSE:", raw)
 
         if "content" not in raw:
             return {
@@ -144,9 +155,9 @@ Format:
 
         text = raw["content"][0]["text"]
 
-        # Strong JSON extraction
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
+            print("❌ JSON NOT FOUND IN:", text)
             return {
                 "confidence": 0.5,
                 "reason": "Fallback - JSON not found"
@@ -160,7 +171,7 @@ Format:
         }
 
     except Exception as e:
-        print("CLAUDE ERROR:", e)
+        print("🚨 CLAUDE ERROR:", str(e))
         return {
             "confidence": 0.5,
             "reason": "Fallback - Exception"
@@ -172,6 +183,8 @@ Format:
 
 @app.post("/webhook/lux")
 async def receive_lux_signal(signal: LuxSignal):
+
+    print("📩 RECEIVED SIGNAL:", signal)
 
     price = get_current_price(signal.symbol)
     atr = get_atr(signal.symbol)
