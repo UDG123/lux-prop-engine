@@ -14,21 +14,34 @@ async def startup():
     pool = await asyncpg.create_pool(DATABASE_URL)
     print("Database connected")
 
-def get_current_price(symbol):
-    # Normalize FX symbols like EURUSD → EUR/USD
+def get_price_and_atr(symbol):
+    # Normalize FX symbol
     if "/" not in symbol and len(symbol) == 6:
         symbol = symbol[:3] + "/" + symbol[3:]
 
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
-    response = requests.get(url)
-    data = response.json()
+    api_key = os.getenv("TWELVEDATA_API_KEY")
 
-    print("TWELVEDATA RESPONSE:", data)
+    # Get current price
+    price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={api_key}"
+    price_response = requests.get(price_url).json()
 
-    if "price" not in data:
-        return None
+    if "price" not in price_response:
+        print("PRICE ERROR:", price_response)
+        return None, None
 
-    return float(data["price"])
+    price = float(price_response["price"])
+
+    # Get ATR (15 minute timeframe)
+    atr_url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={api_key}"
+    atr_response = requests.get(atr_url).json()
+
+    if "values" not in atr_response:
+        print("ATR ERROR:", atr_response)
+        return price, None
+
+    atr = float(atr_response["values"][0]["atr"])
+
+    return price, atr
 
 @app.get("/")
 async def root():
