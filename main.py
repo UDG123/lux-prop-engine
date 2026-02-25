@@ -58,12 +58,18 @@ async def lux_webhook(request: Request):
     if not symbol or not direction or not bot_name:
         raise HTTPException(status_code=400, detail="Invalid payload")
 
-    current_price = get_current_price(symbol)
+    current_price, atr = get_price_and_atr(symbol)
+
+if not current_price or not atr:
+    raise HTTPException(status_code=500, detail="Market data unavailable")
 
     if not current_price:
         raise HTTPException(status_code=500, detail="Market data unavailable")
 
-    risk_distance = 0.0020
+   risk_multiplier = 1.2   # adjustable
+rr_ratio = 1.8
+
+risk_distance = atr * risk_multiplier
 
     if direction.upper() == "BUY":
         stop_loss = current_price - risk_distance
