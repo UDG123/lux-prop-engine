@@ -2,6 +2,7 @@ import os
 import requests
 import asyncpg
 import json
+import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -39,7 +40,6 @@ class LuxSignal(BaseModel):
 # =========================
 
 def format_symbol(symbol: str):
-    # Convert EURUSD -> EUR/USD
     if "/" not in symbol and len(symbol) == 6:
         return f"{symbol[:3]}/{symbol[3:]}"
     return symbol
@@ -70,8 +70,7 @@ def get_atr(symbol):
     if "values" not in data:
         raise HTTPException(status_code=400, detail="ATR unavailable")
 
-    latest = float(data["values"][0]["atr"])
-    return latest
+    return float(data["values"][0]["atr"])
 
 def classify_regime(atr):
     if atr < 0.0003:
@@ -86,11 +85,12 @@ def classify_regime(atr):
 # =========================
 
 def consult_claude(symbol, direction, price, atr, regime):
+
     url = "https://api.anthropic.com/v1/messages"
 
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": CLAUDE_API_KEY,  # Correct header
+        "x-api-key": CLAUDE_API_KEY,
         "anthropic-version": "2023-06-01"
     }
 
@@ -103,9 +103,15 @@ Entry Price: {price}
 ATR: {atr}
 Market Regime: {regime}
 
-Return ONLY JSON like:
+Respond ONLY with valid JSON.
+Do not include markdown.
+Do not include explanations.
+Do not include text before or after JSON.
+
+Return exactly:
+
 {{
-    "confidence": 0.0 to 1.0,
+    "confidence": number between 0 and 1,
     "reason": "short explanation"
 }}
 """
@@ -113,8 +119,12 @@ Return ONLY JSON like:
     payload = {
         "model": "claude-3-haiku-20240307",
         "max_tokens": 200,
+        "temperature": 0,
         "messages": [
-            {"role": "user", "content": prompt}
+            {
+                "role": "user",
+                "content": prompt
+            }
         ]
     }
 
@@ -132,7 +142,16 @@ Return ONLY JSON like:
 
         text = raw["content"][0]["text"]
 
-        parsed = json.loads(text)
+        # 🔥 Strong JSON extraction
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            print("JSON NOT FOUND IN:", text)
+            return {
+                "confidence": 0.5,
+                "reason": "Fallback - JSON not found"
+            }
+
+        parsed = json.loads(match.group())
 
         return {
             "confidence": parsed.get("confidence", 0.5),
@@ -157,7 +176,6 @@ async def receive_lux_signal(signal: LuxSignal):
     atr = get_atr(signal.symbol)
     regime = classify_regime(atr)
 
-    # Basic ATR based SL/TP
     if signal.direction.upper() == "BUY":
         stop_loss = price - (atr * 2)
         take_profit = price + (atr * 4)
@@ -165,7 +183,6 @@ async def receive_lux_signal(signal: LuxSignal):
         stop_loss = price + (atr * 2)
         take_profit = price - (atr * 4)
 
-    # Consult Claude
     ai = consult_claude(
         signal.symbol,
         signal.direction,
@@ -174,7 +191,6 @@ async def receive_lux_signal(signal: LuxSignal):
         regime
     )
 
-    # Store in DB
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO trade_queue(symbol, direction, entry, stop_loss, take_profit, regime, ai_confidence, ai_reason)
