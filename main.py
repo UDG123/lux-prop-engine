@@ -1,112 +1,116 @@
-from fastapi import FastAPI, Request, HTTPException
 import os
-import asyncpg
 import requests
+import asyncpg
 import json
-import re
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 app = FastAPI()
+
+# =========================
+# ENV VARIABLES
+# =========================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY")
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
-pool = None
+# =========================
+# DATABASE CONNECTION
+# =========================
 
-
-# ===============================
-# STARTUP
-# ===============================
 @app.on_event("startup")
 async def startup():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
     print("Database connected")
 
+# =========================
+# MODELS
+# =========================
 
-# ===============================
-# MARKET DATA + REGIME ENGINE
-# ===============================
-def get_price_and_atr(symbol):
+class LuxSignal(BaseModel):
+    symbol: str
+    direction: str
+    bot: str
+
+# =========================
+# UTILITIES
+# =========================
+
+def format_symbol(symbol: str):
+    # Convert EURUSD -> EUR/USD
     if "/" not in symbol and len(symbol) == 6:
-        symbol = symbol[:3] + "/" + symbol[3:]
+        return f"{symbol[:3]}/{symbol[3:]}"
+    return symbol
 
-    if not TWELVEDATA_API_KEY:
-        print("TWELVEDATA_API_KEY not set")
-        return None, None, None
+def get_current_price(symbol):
+    symbol = format_symbol(symbol)
 
-    price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVEDATA_API_KEY}"
-    price_response = requests.get(price_url).json()
+    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVEDATA_API_KEY}"
+    response = requests.get(url)
+    data = response.json()
 
-    print("PRICE RESPONSE:", price_response)
+    print("PRICE RESPONSE:", data)
 
-    if "price" not in price_response:
-        return None, None, None
+    if "price" not in data:
+        raise HTTPException(status_code=400, detail="Market data unavailable")
 
-    price = float(price_response["price"])
+    return float(data["price"])
 
-    atr_url = (
-        f"https://api.twelvedata.com/atr?"
-        f"symbol={symbol}&interval=15min&time_period=14&outputsize=50&apikey={TWELVEDATA_API_KEY}"
-    )
+def get_atr(symbol):
+    symbol = format_symbol(symbol)
 
-    atr_response = requests.get(atr_url).json()
-    print("ATR RESPONSE:", atr_response)
+    url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={TWELVEDATA_API_KEY}"
+    response = requests.get(url)
+    data = response.json()
 
-    if "values" not in atr_response:
-        return price, None, None
+    print("ATR RESPONSE:", data)
 
-    atr_values = [float(x["atr"]) for x in atr_response["values"]]
+    if "values" not in data:
+        raise HTTPException(status_code=400, detail="ATR unavailable")
 
-    current_atr = atr_values[0]
-    sorted_atr = sorted(atr_values)
+    latest = float(data["values"][0]["atr"])
+    return latest
 
-    percentile = sorted_atr.index(current_atr) / len(sorted_atr)
-
-    if percentile < 0.3:
-        regime = "LOW"
-    elif percentile < 0.7:
-        regime = "NORMAL"
+def classify_regime(atr):
+    if atr < 0.0003:
+        return "LOW"
+    elif atr < 0.0006:
+        return "MEDIUM"
     else:
-        regime = "HIGH"
+        return "HIGH"
 
-    return price, current_atr, regime
+# =========================
+# CLAUDE AI RISK ENGINE
+# =========================
 
-
-# ===============================
-# CLAUDE VALIDATION (DIAGNOSTIC)
-# ===============================
-def claude_validate_trade(symbol, direction, regime, atr, rr_ratio):
-
-    if not CLAUDE_API_KEY:
-        print("CLAUDE_API_KEY not set")
-        return {"approved": True, "confidence": 0.5, "reason": "Fallback - No Key"}
+def consult_claude(symbol, direction, price, atr, regime):
+    url = "https://api.anthropic.com/v1/messages"
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {CLAUDE_API_KEY}",
+        "x-api-key": CLAUDE_API_KEY,  # Correct header
         "anthropic-version": "2023-06-01"
     }
 
     prompt = f"""
-You are a quantitative trading risk evaluator.
+You are a professional prop firm risk committee.
 
 Symbol: {symbol}
 Direction: {direction}
-Regime: {regime}
+Entry Price: {price}
 ATR: {atr}
-Risk/Reward: {rr_ratio}
+Market Regime: {regime}
 
-Return ONLY valid JSON:
-
+Return ONLY JSON like:
 {{
-  "approved": true or false,
-  "confidence": 0-1,
-  "reason": "short explanation"
+    "confidence": 0.0 to 1.0,
+    "reason": "short explanation"
 }}
 """
 
-    body = {
+    payload = {
         "model": "claude-3-haiku-20240307",
         "max_tokens": 200,
         "messages": [
@@ -115,127 +119,92 @@ Return ONLY valid JSON:
     }
 
     try:
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=body
-        )
+        response = requests.post(url, headers=headers, json=payload)
+        raw = response.json()
 
-        result = response.json()
-        print("CLAUDE RAW RESPONSE:", result)
+        print("CLAUDE RAW RESPONSE:", raw)
 
-        # Extract text safely
-        if "content" not in result:
-            return {"approved": True, "confidence": 0.5, "reason": "Fallback - No Content"}
+        if "content" not in raw:
+            return {
+                "confidence": 0.5,
+                "reason": "Fallback - Invalid Claude response"
+            }
 
-        text_output = result["content"][0]["text"]
+        text = raw["content"][0]["text"]
 
-        # Remove markdown if Claude wraps JSON in ```
-        text_output = re.sub(r"```json|```", "", text_output).strip()
+        parsed = json.loads(text)
 
-        parsed = json.loads(text_output)
-
-        return parsed
-
-    except Exception as e:
-        print("CLAUDE EXCEPTION:", str(e))
-        return {"approved": True, "confidence": 0.5, "reason": "Fallback - Exception"}
-
-
-# ===============================
-# ROOT
-# ===============================
-@app.get("/")
-async def root():
-    return {"status": "Lux Prop Engine Running"}
-
-
-# ===============================
-# LUX WEBHOOK
-# ===============================
-@app.post("/webhook/lux")
-async def lux_webhook(request: Request):
-    data = await request.json()
-
-    symbol = data.get("symbol")
-    direction = data.get("direction")
-    bot_name = data.get("bot")
-
-    if not symbol or not direction or not bot_name:
-        raise HTTPException(status_code=400, detail="Invalid payload")
-
-    current_price, atr, regime = get_price_and_atr(symbol)
-
-    if not current_price or not atr:
-        raise HTTPException(status_code=500, detail="Market data unavailable")
-
-    # REGIME RISK LOGIC
-    if regime == "LOW":
-        risk_multiplier = 0.9
-        rr_ratio = 1.5
-    elif regime == "NORMAL":
-        risk_multiplier = 1.2
-        rr_ratio = 1.8
-    else:
-        risk_multiplier = 1.5
-        rr_ratio = 2.2
-
-    risk_distance = atr * risk_multiplier
-
-    if direction.upper() == "BUY":
-        stop_loss = current_price - risk_distance
-        take_profit = current_price + (risk_distance * rr_ratio)
-    else:
-        stop_loss = current_price + risk_distance
-        take_profit = current_price - (risk_distance * rr_ratio)
-
-    # CLAUDE VALIDATION
-    ai_decision = claude_validate_trade(
-        symbol=symbol,
-        direction=direction.upper(),
-        regime=regime,
-        atr=atr,
-        rr_ratio=rr_ratio
-    )
-
-    if not ai_decision.get("approved", False):
         return {
-            "status": "Rejected by AI",
-            "confidence": ai_decision.get("confidence"),
-            "reason": ai_decision.get("reason")
+            "confidence": parsed.get("confidence", 0.5),
+            "reason": parsed.get("reason", "No reason provided")
         }
 
-    # DATABASE INSERT
+    except Exception as e:
+        print("CLAUDE ERROR:", e)
+        return {
+            "confidence": 0.5,
+            "reason": "Fallback - Exception"
+        }
+
+# =========================
+# WEBHOOK
+# =========================
+
+@app.post("/webhook/lux")
+async def receive_lux_signal(signal: LuxSignal):
+
+    price = get_current_price(signal.symbol)
+    atr = get_atr(signal.symbol)
+    regime = classify_regime(atr)
+
+    # Basic ATR based SL/TP
+    if signal.direction.upper() == "BUY":
+        stop_loss = price - (atr * 2)
+        take_profit = price + (atr * 4)
+    else:
+        stop_loss = price + (atr * 2)
+        take_profit = price - (atr * 4)
+
+    # Consult Claude
+    ai = consult_claude(
+        signal.symbol,
+        signal.direction,
+        price,
+        atr,
+        regime
+    )
+
+    # Store in DB
     async with pool.acquire() as conn:
-        bot = await conn.fetchrow(
-            "SELECT id FROM bots WHERE name = $1",
-            bot_name
-        )
-
-        if not bot:
-            raise HTTPException(status_code=404, detail="Bot not found")
-
-        await conn.execute(
-            """
-            INSERT INTO trade_queue
-            (bot_id, symbol, direction, entry, stop_loss, take_profit)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            bot["id"],
-            symbol,
-            direction.upper(),
-            current_price,
-            stop_loss,
-            take_profit
+        await conn.execute("""
+            INSERT INTO trade_queue(symbol, direction, entry, stop_loss, take_profit, regime, ai_confidence, ai_reason)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        """,
+        signal.symbol,
+        signal.direction,
+        price,
+        stop_loss,
+        take_profit,
+        regime,
+        ai["confidence"],
+        ai["reason"]
         )
 
     return {
         "status": "Trade queued",
-        "entry": round(current_price, 5),
-        "stop_loss": round(stop_loss, 5),
-        "take_profit": round(take_profit, 5),
-        "atr": round(atr, 6),
+        "entry": price,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "atr": atr,
         "regime": regime,
-        "ai_confidence": ai_decision.get("confidence"),
-        "ai_reason": ai_decision.get("reason")
+        "ai_confidence": ai["confidence"],
+        "ai_reason": ai["reason"]
     }
+
+# =========================
+# HEALTH CHECK
+# =========================
+
+@app.get("/")
+def health():
+    return {"status": "Lux Prop Engine Running"}
