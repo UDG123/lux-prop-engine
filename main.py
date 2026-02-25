@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 import os
 import asyncpg
+import requests
 
 app = FastAPI()
 
@@ -12,6 +13,16 @@ async def startup():
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
     print("Database connected")
+
+def get_current_price(symbol):
+    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
+    response = requests.get(url)
+    data = response.json()
+    
+    if "price" not in data:
+        return None
+    
+    return float(data["price"])
 
 @app.get("/")
 async def root():
