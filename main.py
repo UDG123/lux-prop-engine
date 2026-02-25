@@ -27,7 +27,7 @@ async def startup():
     print("Database connected")
 
 # =========================
-# MODELS
+# REQUEST MODEL
 # =========================
 
 class LuxSignal(BaseModel):
@@ -36,7 +36,7 @@ class LuxSignal(BaseModel):
     bot: str
 
 # =========================
-# UTILITIES
+# HELPERS
 # =========================
 
 def format_symbol(symbol: str):
@@ -46,7 +46,6 @@ def format_symbol(symbol: str):
 
 def get_current_price(symbol):
     symbol = format_symbol(symbol)
-
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url)
     data = response.json()
@@ -60,7 +59,6 @@ def get_current_price(symbol):
 
 def get_atr(symbol):
     symbol = format_symbol(symbol)
-
     url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url)
     data = response.json()
@@ -81,7 +79,7 @@ def classify_regime(atr):
         return "HIGH"
 
 # =========================
-# CLAUDE AI RISK ENGINE
+# CLAUDE AI ENGINE
 # =========================
 
 def consult_claude(symbol, direction, price, atr, regime):
@@ -111,19 +109,24 @@ Do not include text before or after JSON.
 Return exactly:
 
 {{
-    "confidence": number between 0 and 1,
-    "reason": "short explanation"
+  "confidence": number between 0 and 1,
+  "reason": "short explanation"
 }}
 """
 
     payload = {
-        "model": "claude-3-haiku-20240307",
+        "model": "claude-3-5-haiku-latest",
         "max_tokens": 200,
         "temperature": 0,
         "messages": [
             {
                 "role": "user",
-                "content": prompt
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
             }
         ]
     }
@@ -137,12 +140,12 @@ Return exactly:
         if "content" not in raw:
             return {
                 "confidence": 0.5,
-                "reason": "Fallback - Invalid Claude response"
+                "reason": "Fallback - No content"
             }
 
         text = raw["content"][0]["text"]
 
-        # 🔥 Strong JSON extraction
+        # 🔥 STRONG JSON EXTRACTION
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             print("JSON NOT FOUND IN:", text)
@@ -154,7 +157,7 @@ Return exactly:
         parsed = json.loads(match.group())
 
         return {
-            "confidence": parsed.get("confidence", 0.5),
+            "confidence": float(parsed.get("confidence", 0.5)),
             "reason": parsed.get("reason", "No reason provided")
         }
 
@@ -193,7 +196,16 @@ async def receive_lux_signal(signal: LuxSignal):
 
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO trade_queue(symbol, direction, entry, stop_loss, take_profit, regime, ai_confidence, ai_reason)
+            INSERT INTO trade_queue(
+                symbol,
+                direction,
+                entry,
+                stop_loss,
+                take_profit,
+                regime,
+                ai_confidence,
+                ai_reason
+            )
             VALUES($1,$2,$3,$4,$5,$6,$7,$8)
         """,
         signal.symbol,
