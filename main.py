@@ -50,8 +50,6 @@ def get_current_price(symbol):
     response = requests.get(url)
     data = response.json()
 
-    print("PRICE RESPONSE:", data)
-
     if "price" not in data:
         raise HTTPException(status_code=400, detail="Market data unavailable")
 
@@ -62,8 +60,6 @@ def get_atr(symbol):
     url = f"https://api.twelvedata.com/atr?symbol={symbol}&interval=15min&time_period=14&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url)
     data = response.json()
-
-    print("ATR RESPONSE:", data)
 
     if "values" not in data:
         raise HTTPException(status_code=400, detail="ATR unavailable")
@@ -93,7 +89,9 @@ def consult_claude(symbol, direction, price, atr, regime):
     }
 
     prompt = f"""
-You are a professional prop firm risk committee.
+You are an institutional prop firm risk committee.
+
+Analyze this trade:
 
 Symbol: {symbol}
 Direction: {direction}
@@ -101,21 +99,22 @@ Entry Price: {price}
 ATR: {atr}
 Market Regime: {regime}
 
-Respond ONLY with valid JSON.
-Do not include markdown.
-Do not include explanations.
-Do not include text before or after JSON.
+Return ONLY valid JSON.
 
-Return exactly:
+Do NOT include markdown.
+Do NOT include commentary.
+Do NOT include text outside JSON.
+
+Format:
 
 {{
   "confidence": number between 0 and 1,
-  "reason": "short explanation"
+  "reason": "short professional risk justification"
 }}
 """
 
     payload = {
-        "model": "claude-2.1",
+        "model": "claude-3-5-sonnet-latest",
         "max_tokens": 200,
         "temperature": 0,
         "messages": [
@@ -145,9 +144,9 @@ Return exactly:
 
         text = raw["content"][0]["text"]
 
+        # Strong JSON extraction
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
-            print("JSON NOT FOUND IN:", text)
             return {
                 "confidence": 0.5,
                 "reason": "Fallback - JSON not found"
@@ -227,10 +226,6 @@ async def receive_lux_signal(signal: LuxSignal):
         "ai_confidence": ai["confidence"],
         "ai_reason": ai["reason"]
     }
-
-# =========================
-# HEALTH CHECK
-# =========================
 
 @app.get("/")
 def health():
