@@ -17,13 +17,11 @@ def health():
 async def webhook(signal: LuxSignal, request: Request):
     pool = request.app.state.pool
 
-    # --- Market data ---
     price = await get_price(signal.symbol)
     atr = await get_atr(signal.symbol)
     regime = classify_regime(atr)
     stop_loss, take_profit = calculate_levels(signal.direction, price, atr)
 
-    # --- AI risk assessment ---
     ai = await consult_risk_engine(
         symbol=signal.symbol,
         direction=signal.direction,
@@ -32,13 +30,13 @@ async def webhook(signal: LuxSignal, request: Request):
         regime=regime,
     )
 
-    # --- Persist ---
     trade = {
         "symbol": signal.symbol,
         "direction": signal.direction,
         "entry": price,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        "atr": atr,
         "regime": regime,
         "ai_confidence": ai["confidence"],
         "ai_reason": ai["reason"],
