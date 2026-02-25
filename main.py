@@ -3,6 +3,7 @@ import os
 import asyncpg
 import requests
 import json
+import re
 
 app = FastAPI()
 
@@ -27,7 +28,6 @@ async def startup():
 # MARKET DATA + REGIME ENGINE
 # ===============================
 def get_price_and_atr(symbol):
-    # Normalize FX symbol
     if "/" not in symbol and len(symbol) == 6:
         symbol = symbol[:3] + "/" + symbol[3:]
 
@@ -35,26 +35,25 @@ def get_price_and_atr(symbol):
         print("TWELVEDATA_API_KEY not set")
         return None, None, None
 
-    # ---- PRICE ----
     price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TWELVEDATA_API_KEY}"
     price_response = requests.get(price_url).json()
 
+    print("PRICE RESPONSE:", price_response)
+
     if "price" not in price_response:
-        print("PRICE ERROR:", price_response)
         return None, None, None
 
     price = float(price_response["price"])
 
-    # ---- ATR HISTORY ----
     atr_url = (
         f"https://api.twelvedata.com/atr?"
         f"symbol={symbol}&interval=15min&time_period=14&outputsize=50&apikey={TWELVEDATA_API_KEY}"
     )
 
     atr_response = requests.get(atr_url).json()
+    print("ATR RESPONSE:", atr_response)
 
     if "values" not in atr_response:
-        print("ATR ERROR:", atr_response)
         return price, None, None
 
     atr_values = [float(x["atr"]) for x in atr_response["values"]]
@@ -75,39 +74,33 @@ def get_price_and_atr(symbol):
 
 
 # ===============================
-# CLAUDE VALIDATION
+# CLAUDE VALIDATION (DIAGNOSTIC)
 # ===============================
 def claude_validate_trade(symbol, direction, regime, atr, rr_ratio):
+
     if not CLAUDE_API_KEY:
         print("CLAUDE_API_KEY not set")
-        return {"approved": True, "confidence": 0.5, "reason": "No AI key"}
+        return {"approved": True, "confidence": 0.5, "reason": "Fallback - No Key"}
 
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": CLAUDE_API_KEY,
+        "Authorization": f"Bearer {CLAUDE_API_KEY}",
         "anthropic-version": "2023-06-01"
     }
 
     prompt = f"""
 You are a quantitative trading risk evaluator.
 
-Evaluate this trade objectively.
-
 Symbol: {symbol}
 Direction: {direction}
-Volatility Regime: {regime}
+Regime: {regime}
 ATR: {atr}
 Risk/Reward: {rr_ratio}
 
-Rules:
-- Reject weak RR in high volatility.
-- Reject trades in low volatility unless RR is strong.
-- Approve trades aligned with volatility regime.
-- Return JSON only.
+Return ONLY valid JSON:
 
-Format:
 {{
-  "approved": true/false,
+  "approved": true or false,
   "confidence": 0-1,
   "reason": "short explanation"
 }}
@@ -121,20 +114,32 @@ Format:
         ]
     }
 
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers=headers,
-        json=body
-    )
-
-    result = response.json()
-
     try:
-        content = result["content"][0]["text"]
-        return json.loads(content)
-    except:
-        print("CLAUDE ERROR:", result)
-        return {"approved": True, "confidence": 0.5, "reason": "Fallback"}
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=body
+        )
+
+        result = response.json()
+        print("CLAUDE RAW RESPONSE:", result)
+
+        # Extract text safely
+        if "content" not in result:
+            return {"approved": True, "confidence": 0.5, "reason": "Fallback - No Content"}
+
+        text_output = result["content"][0]["text"]
+
+        # Remove markdown if Claude wraps JSON in ```
+        text_output = re.sub(r"```json|```", "", text_output).strip()
+
+        parsed = json.loads(text_output)
+
+        return parsed
+
+    except Exception as e:
+        print("CLAUDE EXCEPTION:", str(e))
+        return {"approved": True, "confidence": 0.5, "reason": "Fallback - Exception"}
 
 
 # ===============================
@@ -164,9 +169,7 @@ async def lux_webhook(request: Request):
     if not current_price or not atr:
         raise HTTPException(status_code=500, detail="Market data unavailable")
 
-    # ===============================
-    # REGIME-BASED RISK ENGINE
-    # ===============================
+    # REGIME RISK LOGIC
     if regime == "LOW":
         risk_multiplier = 0.9
         rr_ratio = 1.5
@@ -186,9 +189,7 @@ async def lux_webhook(request: Request):
         stop_loss = current_price + risk_distance
         take_profit = current_price - (risk_distance * rr_ratio)
 
-    # ===============================
     # CLAUDE VALIDATION
-    # ===============================
     ai_decision = claude_validate_trade(
         symbol=symbol,
         direction=direction.upper(),
@@ -200,13 +201,11 @@ async def lux_webhook(request: Request):
     if not ai_decision.get("approved", False):
         return {
             "status": "Rejected by AI",
-            "reason": ai_decision.get("reason"),
-            "confidence": ai_decision.get("confidence")
+            "confidence": ai_decision.get("confidence"),
+            "reason": ai_decision.get("reason")
         }
 
-    # ===============================
     # DATABASE INSERT
-    # ===============================
     async with pool.acquire() as conn:
         bot = await conn.fetchrow(
             "SELECT id FROM bots WHERE name = $1",
