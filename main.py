@@ -15,16 +15,15 @@ async def startup():
     print("Database connected")
 
 def get_current_price(symbol):
+    # Normalize FX symbols like EURUSD → EUR/USD
+    if "/" not in symbol and len(symbol) == 6:
+        symbol = symbol[:3] + "/" + symbol[3:]
+
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
     response = requests.get(url)
     data = response.json()
+
     print("TWELVEDATA RESPONSE:", data)
-    if "price" not in data:
-        return None
-    return float(data["price"])
-    url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={os.getenv('TWELVEDATA_API_KEY')}"
-    response = requests.get(url)
-    data = response.json()
 
     if "price" not in data:
         return None
